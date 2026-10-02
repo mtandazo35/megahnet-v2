@@ -1,0 +1,68 @@
+# Entorno LOCAL de desarrollo. No tiene nada que ver con produccion y no puede
+# alcanzarla: todo vive en contenedores de esta maquina.
+#
+#   cd docker && docker compose up -d --build
+#   http://localhost:8080
+#
+# El codigo se monta desde el repositorio: lo que edites en VS Code se ve al
+# instante, sin reconstruir la imagen.
+
+name: megahnet-local
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: docker/php/Dockerfile
+    container_name: megahnet-web
+    restart: unless-stopped
+    ports:
+      - "${PUERTO_WEB:-8080}:80"
+    volumes:
+      # El proyecto entero, en vivo.
+      - ..:/var/www/html
+      # vendor/ en un volumen aparte: composer instala dentro del contenedor
+      # (Linux) y no queremos que eso pise lo que haya en Windows ni al reves.
+      - vendor:/var/www/html/vendor
+    environment:
+      DB_HOST: db
+      DB_NAME: ${DB_NAME:-sistema}
+      DB_USER: ${DB_USER:-megahnet}
+      DB_PASSWORD: ${DB_PASSWORD:-megahnet}
+      BASE_URL: http://localhost:${PUERTO_WEB:-8080}/
+      APP_TITLE: MEGAHNET (local)
+      PUERTO_WEB: ${PUERTO_WEB:-8080}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    # La misma version que corre en los servidores.
+    image: mariadb:11.8
+    container_name: megahnet-db
+    restart: unless-stopped
+    ports:
+      # Solo desde esta maquina: 127.0.0.1, nunca 0.0.0.0.
+      - "127.0.0.1:${PUERTO_DB:-3307}:3306"
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-raiz-local}
+      MARIADB_DATABASE: ${DB_NAME:-sistema}
+      MARIADB_USER: ${DB_USER:-megahnet}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-megahnet}
+    volumes:
+      - datos:/var/lib/mysql
+      # Se ejecuta SOLO la primera vez, cuando la base esta vacia:
+      # primero el esquema, despues las migraciones con nuestra propia libreria.
+      - ./db/10-esquema.sh:/docker-entrypoint-initdb.d/10-esquema.sh:ro
+      - ./db/20-migraciones.sh:/docker-entrypoint-initdb.d/20-migraciones.sh:ro
+      - ../db:/megahnet-db:ro
+      - ../installer:/megahnet-installer:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  datos:
+  vendor:

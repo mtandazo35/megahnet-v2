@@ -84,3 +84,6 @@ assets/storage/
 installer/tests/aplicadas.txt
 installer/tests/estado.tsv
 installer/tests/migrations/
+
+# Ajustes locales del entorno Docker (credenciales de juguete, pero no se suben)
+docker/.env
