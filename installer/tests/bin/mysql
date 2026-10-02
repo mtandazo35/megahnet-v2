@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Cliente mysql FALSO para probar migraciones.sh sin servidor.
+# Guarda el "registro" en $MIGSTUB_STATE y las migraciones aplicadas en
+# $MIGSTUB_APPLIED. Falla la migracion cuyo contenido tenga ESTO_FALLA.
+set -uo pipefail
+
+STATE="${MIGSTUB_STATE:?}"
+APPLIED="${MIGSTUB_APPLIED:?}"
+
+# Comprobacion dura: la contrasena NUNCA puede venir por argv.
+for a in "$@"; do
+    case "$a" in
+        -p*|--password=*) echo "STUB: contrasena en argv ($a)" >&2; exit 99 ;;
+    esac
+done
+
+sql="$(cat)"
+
+if [ -n "${MYSQL_PWD:-}" ]; then
+    echo "Warning: ruido inocuo del cliente" >&2
+fi
+
+case "$sql" in
+    *'CREATE TABLE IF NOT EXISTS `migraciones_aplicadas`'*)
+        [ -f "$STATE" ] || : > "$STATE"
+        exit 0 ;;
+    "SELECT 1;"*)
+        echo 1; exit 0 ;;
+    "SELECT archivo, suma"*)
+        [ -f "$STATE" ] || { echo "ERROR 1146: Table doesn't exist" >&2; exit 1; }
+        LC_ALL=C sort "$STATE"; exit 0 ;;
+    "INSERT INTO"*)
+        fila="$(printf '%s\n' "$sql" | sed -n "s/^VALUES ('\([^']*\)', '\([^']*\)', '\([^']*\)', NOW(), \([0-9]*\), '\([^']*\)', \(.*\), '\([^']*\)')$/\1\t\2\t\3\t\5\t2026-10-02 10:00:00\t\4/p")"
+        [ -n "$fila" ] || { echo "STUB: no supe parsear el INSERT" >&2; exit 98; }
+        arch="${fila%%$'\t'*}"
+        awk -F"\t" -v a="$arch" '$1!=a' "$STATE" > "$STATE.tmp"
+        mv "$STATE.tmp" "$STATE"
+        printf '%s\n' "$fila" >> "$STATE"
+        exit 0 ;;
+    "UPDATE"*)
+        nueva="$(printf '%s\n' "$sql" | sed -n "s/^UPDATE .* SET suma='\([^']*\)'.*$/\1/p")"
+        arch="$(printf '%s\n' "$sql" | sed -n "s/^.*WHERE archivo='\([^']*\)';$/\1/p")"
+        awk -F'\t' -v OFS='\t' -v a="$arch" -v s="$nueva" '$1==a{$2=s}1' "$STATE" > "$STATE.tmp"
+        mv "$STATE.tmp" "$STATE"
+        exit 0 ;;
+esac
+
+# Cualquier otra cosa = contenido de una migracion.
+if printf '%s' "$sql" | grep -q 'ESTO_FALLA'; then
+    echo "ERROR 1064 (42000) at line 4: You have an error in your SQL syntax" >&2
+    exit 1
+fi
+printf '%s\n' "$sql" | head -1 >> "$APPLIED"
+exit 0

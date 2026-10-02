@@ -79,3 +79,8 @@ assets/docs/backups/
 # Datos de clientes generados via UI (contratos .docx) y backups ad-hoc
 assets/storage/
 *-bak-*
+
+# Restos de ejecutar las pruebas del instalador
+installer/tests/aplicadas.txt
+installer/tests/estado.tsv
+installer/tests/migrations/
