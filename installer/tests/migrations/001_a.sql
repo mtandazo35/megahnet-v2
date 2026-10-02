@@ -1,0 +1,2 @@
+-- 001
+CREATE TABLE IF NOT EXISTS a (id INT);
