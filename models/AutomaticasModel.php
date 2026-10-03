@@ -58,14 +58,29 @@ class AutomaticasModel extends Query
 
     public function getContratosFacturar($mesFacturar, $estado, $valor, $limite = 0)
     {
-        // Idempotencia v2 (2026-06-05): aunque mes_facturar.<mes>=0, excluir
-        // contratos que ya tienen un credito creado HOY. Esto bloquea la doble
-        // facturacion del bug del 2026-06-01 (cron disparado dos veces el mismo dia).
+        // Idempotencia v3 (2026-10-02): se excluyen los contratos que ya tienen
+        // un credito de ESTE MES, no solo del mismo dia.
+        //
+        // La version anterior miraba CURDATE() y eso dejo pasar un caso real: el
+        // 2026-10-01 se facturaron 12 contratos a mano desde el panel, y ese
+        // camino no marca mes_facturar. Al correr el cron el dia 2 los vio
+        // pendientes y los facturo otra vez: 10 clientes con dos ordenes del
+        // mismo mes.
+        //
+        // Los seis sitios que usan esta consulta facturan siempre el mes en
+        // curso, asi que mirar el mes completo no deja fuera ningun caso
+        // legitimo. La marca de mes_facturar sigue siendo la via principal;
+        // esto es la red por si esa marca falla, que es justo lo que paso.
         $sql = "SELECT c.id,c.productos,c.total,c.direccion,c.comentario,cl.id AS idCliente ,cl.nombre,c.estado,c.factura FROM contratos c
         INNER JOIN clientes cl ON cl.id=c.id_cliente
         INNER JOIN mes_facturar mf ON mf.id_contrato=c.id
         WHERE mf.$mesFacturar = 0 AND c.estado = $estado AND c.factura = $valor
-          AND NOT EXISTS (SELECT 1 FROM creditos cr WHERE cr.id_contrato = c.id AND cr.fecha = CURDATE())";
+          AND NOT EXISTS (
+                SELECT 1 FROM creditos cr
+                WHERE cr.id_contrato = c.id
+                  AND cr.fecha >= DATE_FORMAT(CURDATE(), '%Y-%m-01')
+                  AND cr.fecha <  DATE_FORMAT(CURDATE() + INTERVAL 1 MONTH, '%Y-%m-01')
+          )";
         $limite = (int)$limite;
         if ($limite > 0) { $sql .= " LIMIT " . $limite; }
         return $this->selectAll($sql);
