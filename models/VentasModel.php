@@ -281,12 +281,47 @@ class VentasModel extends Query
     }
     public function registrarDetalle($numSerieElectronica, $cantidad, $descripcion, $precio, $total, $iva, $codigo, $descuentoDetalle, $precio_pvp, $descuento, $idProducto)
     {
+        // Se recorta a lo que admite el SRI antes de tocar la base. Si no, una
+        // descripcion larga lanza "Data too long for column 'item'" y la factura
+        // se queda sin lineas (la cabecera ya estaba insertada).
+        $descripcion = recortarCampoSri($descripcion, SRI_MAX_DESCRIPCION, 'item', $numSerieElectronica);
+        $codigo = recortarCampoSri($codigo, SRI_MAX_CODIGO_PRINCIPAL, 'codproducto', $numSerieElectronica);
         $sql = "INSERT INTO detalle_factura_electronica (orden_no, cantidad, item, precio_u,total, iva,codproducto,descuento,precio_pvp,por_descuento,id_producto) VALUES (?,?,?,?,?,?,?,?,?,?,?)";
         $array = array($numSerieElectronica, $cantidad, $descripcion, $precio, $total, $iva, $codigo, $descuentoDetalle, $precio_pvp, $descuento, $idProducto);
         return $this->insertar($sql, $array);
     }
-    public function actualizarClaveAccesso($claveAccesso, $idVenta)
+
+    /** Cuantas lineas tiene ya un comprobante. 0 = no se puede enviar al SRI. */
+    public function contarDetalle($ordenNo)
     {
+        $sql = "SELECT COUNT(*) AS total FROM detalle_factura_electronica WHERE orden_no = ?";
+        $data = $this->select($sql, array($ordenNo));
+        return isset($data['total']) ? (int)$data['total'] : 0;
+    }
+
+    /**
+     * Guarda la clave de acceso y el estado REAL del comprobante.
+     *
+     * $autorizado: null = no se sabe (se mantiene el comportamiento de siempre,
+     * para no cambiar a los demas llamadores); true = el SRI lo autorizo;
+     * false = el SRI NO lo autorizo.
+     *
+     * Antes esto escribia siempre estado_proceso=1, sri_enviado=1 y
+     * correo_enviado=1 sin mirar la respuesta del SRI. Como el panel cuenta
+     * estado_proceso=1 como "autorizada", una factura devuelta se veia emitida;
+     * y como cron_sri_facturas busca estado_proceso=0 y cron_sri_reintentos
+     * busca estado_proceso=2, el 1 no caia en ninguno y la factura quedaba
+     * varada para siempre ("Facturas a reintentar: 0" con facturas pendientes).
+     * Con estado_proceso=2 el cron de reintentos SI la vuelve a tomar.
+     */
+    public function actualizarClaveAccesso($claveAccesso, $idVenta, $autorizado = null, $mensajeSri = '')
+    {
+        if ($autorizado === false) {
+            $sql = "UPDATE datos_cabecera_electronica
+                    SET claveacceso = ?, estado_proceso = 2, sri_enviado = 1, correo_enviado = 0, mensaje_sri = ?
+                    WHERE orden_no = ?";
+            return $this->save($sql, array($claveAccesso, mb_substr((string)$mensajeSri, 0, 250), $idVenta));
+        }
         $sql = "UPDATE datos_cabecera_electronica SET claveacceso = ?, estado_proceso = 1, sri_enviado = 1, correo_enviado = 1 WHERE orden_no = ?";
         $array = array($claveAccesso, $idVenta);
         return $this->save($sql, $array);

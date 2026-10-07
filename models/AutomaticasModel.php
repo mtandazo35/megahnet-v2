@@ -231,6 +231,11 @@ class AutomaticasModel extends Query
 
     public function registrarDetalle($numSerieElectronica, $cantidad, $descripcion, $precio, $total, $iva, $codigo, $descuentoDetalle,$precio_pvp,$descuento, $idProducto)
     {
+        // Mismo recorte que en VentasModel: aqui la descripcion es el nombre del
+        // producto mas la lista de meses facturados, que crece si se cobran
+        // varios meses de una vez.
+        $descripcion = recortarCampoSri($descripcion, SRI_MAX_DESCRIPCION, 'item', $numSerieElectronica);
+        $codigo = recortarCampoSri($codigo, SRI_MAX_CODIGO_PRINCIPAL, 'codproducto', $numSerieElectronica);
         $sql = 'INSERT INTO detalle_factura_electronica (orden_no, cantidad, item, precio_u,total, iva,codproducto,descuento,precio_pvp,por_descuento,id_producto) VALUES (?,?,?,?,?,?,?,?,?,?,?)';
         $array = array($numSerieElectronica, $cantidad, $descripcion, $precio, $total, $iva, $codigo, $descuentoDetalle,$precio_pvp,$descuento, $idProducto);
         return $this->insertar($sql, $array);

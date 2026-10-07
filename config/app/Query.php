@@ -25,6 +25,33 @@ class Query extends Conexion
         return $result->fetchAll(PDO::FETCH_ASSOC);
     }
 
+    // === Transacciones =========================================================
+    // Hacen falta para que una cabecera y su detalle entren o no entren juntos.
+    // Sin esto, si el INSERT del detalle falla a mitad (p.ej. una descripcion mas
+    // larga que la columna), la cabecera ya quedo guardada y nace una factura con
+    // total pero sin lineas: el XML sale con <detalles></detalles> y el SRI la
+    // devuelve con el error 35. Paso en rutanet el 2026-10-02 y el 2026-10-07.
+    //
+    // Cada modelo tiene su propia conexion (Query::__construct crea una), asi que
+    // la transaccion cubre todo lo que se haga a traves del MISMO modelo.
+    public function iniciarTransaccion()
+    {
+        if ($this->con->inTransaction()) {
+            return false; // ya hay una abierta; no se anidan
+        }
+        return $this->con->beginTransaction();
+    }
+
+    public function confirmar()
+    {
+        return $this->con->inTransaction() ? $this->con->commit() : false;
+    }
+
+    public function revertir()
+    {
+        return $this->con->inTransaction() ? $this->con->rollBack() : false;
+    }
+
     // === Inserta un registro y devuelve el ID ===
     public function insertar($sql, $array)
     {

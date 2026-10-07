@@ -1055,6 +1055,38 @@ function enviarCorreoSMTP($to, $asunto, $cuerpoHtml, $opts = [])
 }
 }
 
+/**
+ * Limites de la ficha tecnica del SRI para el detalle de un comprobante.
+ * Si un texto se pasa de largo, el SRI devuelve el comprobante con el error 35
+ * ("ARCHIVO NO CUMPLE ESTRUCTURA XML") y la factura no se emite.
+ */
+if (!defined('SRI_MAX_DESCRIPCION')) define('SRI_MAX_DESCRIPCION', 300);
+if (!defined('SRI_MAX_CODIGO_PRINCIPAL')) define('SRI_MAX_CODIGO_PRINCIPAL', 25);
+
+if (!function_exists("recortarCampoSri")) {
+/**
+ * Recorta un texto al maximo que acepta el SRI y deja constancia si recorto.
+ *
+ * Es una red de seguridad, no la solucion: lo correcto es que el operador no
+ * pegue descripciones kilometricas. Pero antes de esto una descripcion larga
+ * tumbaba el INSERT del detalle con una PDOException que nadie capturaba, la
+ * cabecera ya estaba guardada y la factura nacia sin lineas.
+ */
+function recortarCampoSri($texto, $max, $campo = '', $referencia = '') {
+    $texto = (string)$texto;
+    if (function_exists('mb_strlen')) {
+        if (mb_strlen($texto, 'UTF-8') <= $max) return $texto;
+        $recortado = mb_substr($texto, 0, $max, 'UTF-8');
+    } else {
+        if (strlen($texto) <= $max) return $texto;
+        $recortado = substr($texto, 0, $max);
+    }
+    error_log('SRI: se recorto ' . ($campo ?: 'un campo') . ' a ' . $max
+        . ' caracteres' . ($referencia !== '' ? ' (comprobante ' . $referencia . ')' : ''));
+    return $recortado;
+}
+}
+
 if (!function_exists("asset_v")) {
 function asset_v($relPath) {
     static $cache = [];

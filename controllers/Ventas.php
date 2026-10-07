@@ -298,54 +298,37 @@ class Ventas extends Controller
                             $res = array('msg' => 'LAS VENTAS SUPERIOR A $50 REQUIERE DATOS CLIENTE', 'type' => 'warning');
                         } else {
 
-                            $ventaEncabezado = $this->model->registrarEncabezado(
-                                $fecha,
+                            // Cabecera y detalle entran juntos o no entra ninguno.
+                            // Antes, si el detalle fallaba a mitad (una descripcion mas
+                            // larga que la columna), la cabecera ya estaba guardada y
+                            // nacia una factura con total y CERO lineas: el XML salia con
+                            // <detalles></detalles> y el SRI la devolvia siempre.
+                            $guardado = $this->guardarComprobanteElectronico(
                                 $numSerieElectronica,
-                                $datosCliente['nombre'],
-                                $datosCliente['direccion'],
-                                $datosCliente['telefono'],
-                                $datosCliente['num_identidad'],
-                                $tipoIdentificacion,
-                                $datosCliente['correo'],
-                                $empresa['establecimiento'],
-                                $empresa['puntoemi'],
-                                $empresa['ruc'],
-                                AMBIENTE,
-                                $empresa['razon_social'],
-                                $empresa['nombre'],
-                                $numSerieElectronica,
-                                $empresa['direccion'],
-                                $empresa['contabilidad'],
-                                $totalDescuento,
-                                $total,
-                                $tipoPago,
-                                $estado,
-                                $metodo,
-                                $this->id_usuario,
-                                $idCliente
+                                $datos['productos'],
+                                array(
+                                    'fecha' => $fecha,
+                                    'cliente' => $datosCliente,
+                                    'tipoIdentificacion' => $tipoIdentificacion,
+                                    'empresa' => $empresa,
+                                    'totalDescuento' => $totalDescuento,
+                                    'total' => $total,
+                                    'tipoPago' => $tipoPago,
+                                    'estado' => $estado,
+                                    'metodo' => $metodo,
+                                    'idCliente' => $idCliente,
+                                    'descuento' => $descuento,
+                                )
                             );
-                            if ($ventaEncabezado > 0) {
-                                foreach ($datos['productos'] as $producto) {
-                                    $result = $this->model->getProducto($producto['id']);
-                                    $codigo = $result['codigo'];
-                                    $descripcion = $producto['nombre']; //$result['descripcion']; es para el nombre original que van en la factura
-                                    $iva = $result['iva'];
-                                    $precio = $producto['precio']; //result es lo que trae de la tabla producto y producto es lo que trae de la tabla modificada de ventas
-                                    if ($result['iva'] == 0) {
-                                        $precio_siniva = $precio;
-                                    } else {
-                                        $precio_siniva = round($precio / (CONCAT .  $empresa['impuesto']), 4); //LO DIVIDIDO PARA EL PRECIO ES CON EL IVA DEL CONFIGURACION
 
-                                    }
-                                    // print_r($precio_siniva);
-                                    $cantidad = $producto['cantidad'];
-                                    $subTotal = round($precio_siniva * $producto['cantidad'], 4);
-                                    $descuentoDetalle = round(($subTotal * $descuento) / 100, 2);
-                                    // print_r($subTotal);
-                                    //array_push($array['productos'], $data);
-                                    // $total += $subTotal;
-                                    $ventaDetalle =  $this->model->registrarDetalle($numSerieElectronica, $cantidad, $descripcion, $precio_siniva, $subTotal, $iva, $codigo, $descuentoDetalle,$precio,$descuento, $producto['id']);
-                                }
+                            if (!$guardado['ok']) {
+                                $this->responder(array('msg' => $guardado['msg'], 'type' => 'error'));
+                            }
+
+                            $ventaEncabezado = $guardado['encabezado'];
+                            $ventaDetalle = $guardado['detalle'];
+
+                            if ($ventaEncabezado > 0) {
                                 if ($ventaDetalle > 0) {
                                     foreach ($datos['productos'] as $producto) {
                                         $result = $this->model->getProducto($producto['id']);
@@ -389,7 +372,17 @@ class Ventas extends Controller
                                             $autorizacion = ['numeroComprobantes' => 1, 'autorizaciones' => ['autorizacion' => ['estado' => 'NO_AUTORIZADO']]];
                                             $claveAcceso = $claveAcceso ?? '';
                                         }
-                                        $this->model->actualizarClaveAccesso($claveAcceso, $numSerieElectronica);
+                                        // Se guarda el estado REAL. Si el SRI no autorizo,
+                                        // la factura queda en estado_proceso=2 para que el
+                                        // cron de reintentos la vuelva a tomar, en vez de
+                                        // darse por autorizada y quedar varada.
+                                        $resultadoSri = $this->interpretarRespuestaSri($validacion ?? null, $autorizacion);
+                                        $this->model->actualizarClaveAccesso(
+                                            $claveAcceso,
+                                            $numSerieElectronica,
+                                            $resultadoSri['autorizado'],
+                                            $resultadoSri['mensaje']
+                                        );
                                     } catch (\Throwable $e) {
                                         error_log('SRI ventas fallo: ' . $e->getMessage());
                                         $autorizacion = ['numeroComprobantes' => 1, 'autorizaciones' => ['autorizacion' => ['estado' => 'NO_AUTORIZADO']]];
@@ -490,6 +483,168 @@ class Ventas extends Controller
         die();
     }
 
+
+    /**
+     * Guarda cabecera + detalle de un comprobante electronico de forma atomica.
+     *
+     * Devuelve ['ok'=>bool, 'encabezado'=>int, 'detalle'=>int, 'msg'=>string].
+     * Si cualquier INSERT falla, se revierte TODO y no queda cabecera huerfana.
+     *
+     * El 2026-10-02 y el 2026-10-07, en rutanet, una descripcion mas larga que la
+     * columna `item` lanzo una PDOException que nadie capturaba: el guardado murio
+     * despues de insertar la cabecera y nacieron dos facturas con total y cero
+     * lineas, que el SRI devolvio con el error 35.
+     */
+    private function guardarComprobanteElectronico($numSerieElectronica, $productos, $ctx)
+    {
+        $encabezado = 0;
+        $detalle = 0;
+        $this->model->iniciarTransaccion();
+        try {
+            $encabezado = $this->model->registrarEncabezado(
+                $ctx['fecha'],
+                $numSerieElectronica,
+                $ctx['cliente']['nombre'],
+                $ctx['cliente']['direccion'],
+                $ctx['cliente']['telefono'],
+                $ctx['cliente']['num_identidad'],
+                $ctx['tipoIdentificacion'],
+                $ctx['cliente']['correo'],
+                $ctx['empresa']['establecimiento'],
+                $ctx['empresa']['puntoemi'],
+                $ctx['empresa']['ruc'],
+                AMBIENTE,
+                $ctx['empresa']['razon_social'],
+                $ctx['empresa']['nombre'],
+                $numSerieElectronica,
+                $ctx['empresa']['direccion'],
+                $ctx['empresa']['contabilidad'],
+                $ctx['totalDescuento'],
+                $ctx['total'],
+                $ctx['tipoPago'],
+                $ctx['estado'],
+                $ctx['metodo'],
+                $this->id_usuario,
+                $ctx['idCliente']
+            );
+
+            if ($encabezado > 0) {
+                foreach ($productos as $producto) {
+                    $result = $this->model->getProducto($producto['id']);
+                    $codigo = $result['codigo'];
+                    $descripcion = $producto['nombre']; // el nombre editable que va en la factura
+                    $iva = $result['iva'];
+                    $precio = $producto['precio'];
+                    if ($result['iva'] == 0) {
+                        $precio_siniva = $precio;
+                    } else {
+                        $precio_siniva = round($precio / (CONCAT . $ctx['empresa']['impuesto']), 4);
+                    }
+                    $cantidad = $producto['cantidad'];
+                    $subTotal = round($precio_siniva * $producto['cantidad'], 4);
+                    $descuentoDetalle = round(($subTotal * $ctx['descuento']) / 100, 2);
+                    $detalle = $this->model->registrarDetalle(
+                        $numSerieElectronica, $cantidad, $descripcion, $precio_siniva, $subTotal,
+                        $iva, $codigo, $descuentoDetalle, $precio, $ctx['descuento'], $producto['id']
+                    );
+                    if ($detalle <= 0) {
+                        throw new \RuntimeException('no se pudo guardar una linea del detalle');
+                    }
+                }
+            }
+            $this->model->confirmar();
+            return array('ok' => true, 'encabezado' => $encabezado, 'detalle' => $detalle, 'msg' => '');
+        } catch (\Throwable $e) {
+            $this->model->revertir();
+
+            // OJO: revertir no devuelve el AUTO_INCREMENT que consumio el INSERT
+            // de la cabecera. Y el numero de comprobante se calcula como
+            // MAX(id)+1 mientras el `id` lo pone el AUTO_INCREMENT, asi que si el
+            // contador queda adelantado, la SIGUIENTE factura nace con
+            // id != orden_no y el detalle revienta contra la clave foranea
+            // (orden_no referencia datos_cabecera_electronica.id).
+            // resetFactura realinea el contador a MAX(id)+1, igual que ya hacia
+            // el codigo cuando el detalle devolvia 0.
+            try {
+                $this->model->resetFactura('datos_cabecera_electronica');
+            } catch (\Throwable $e2) {
+                error_log('No se pudo realinear el AUTO_INCREMENT: ' . $e2->getMessage());
+            }
+
+            error_log('Factura electronica no guardada (orden ' . $numSerieElectronica . '): ' . $e->getMessage());
+            return array(
+                'ok' => false,
+                'encabezado' => 0,
+                'detalle' => 0,
+                'msg' => 'NO SE PUDO GUARDAR LA FACTURA. Revisa que las descripciones no sean demasiado largas (maximo '
+                         . SRI_MAX_DESCRIPCION . ' caracteres). No se emitio nada.',
+            );
+        }
+    }
+
+    /**
+     * Traduce lo que contesto el SRI a "¿quedo autorizada?" y un mensaje legible.
+     *
+     * Respeta las mismas condiciones que ya usaba el controlador para decidir si
+     * mostrar exito o error, asi que no cambia lo que ve el operador: lo que
+     * cambia es que ahora ese veredicto tambien se GUARDA.
+     */
+    private function interpretarRespuestaSri($validacion, $autorizacion)
+    {
+        $estadoValidacion = isset($validacion['estado']) ? (string)$validacion['estado'] : '';
+        $estadoAutoriz = isset($autorizacion['autorizaciones']['autorizacion']['estado'])
+                            ? (string)$autorizacion['autorizaciones']['autorizacion']['estado'] : '';
+        $numComp = isset($autorizacion['numeroComprobantes']) ? (int)$autorizacion['numeroComprobantes'] : 0;
+        $mensaje = $this->mensajeSri($validacion, $autorizacion);
+
+        // "Ya estaba registrada" no es un fallo: manda la autorizacion.
+        $msgUpper = mb_strtoupper($mensaje, 'UTF-8');
+        if (strpos($msgUpper, 'REGISTRADA') !== false || strpos($msgUpper, 'YA EXIST') !== false) {
+            return array('autorizado' => ($estadoAutoriz === 'AUTORIZADO'), 'mensaje' => $mensaje);
+        }
+
+        if ($estadoValidacion === 'DEVUELTA'
+            || $numComp === 0
+            || ($estadoAutoriz !== '' && $estadoAutoriz !== 'AUTORIZADO')) {
+            return array('autorizado' => false, 'mensaje' => $mensaje);
+        }
+
+        return array('autorizado' => true, 'mensaje' => '');
+    }
+
+    /**
+     * Arma un mensaje con el motivo que dio el SRI, incluido `informacionAdicional`,
+     * que es donde viene la causa de verdad (p.ej. "The content of element
+     * 'detalles' is not complete"). Antes ese texto solo quedaba en un .txt de
+     * facturaelectronica/errores/ y nadie lo veia desde el panel.
+     */
+    private function mensajeSri($validacion, $autorizacion)
+    {
+        $partes = array();
+        foreach (array(
+            isset($validacion['comprobantes']['comprobante']['mensajes']['mensaje']) ? $validacion['comprobantes']['comprobante']['mensajes']['mensaje'] : null,
+            isset($autorizacion['autorizaciones']['autorizacion']['mensajes']['mensaje']) ? $autorizacion['autorizaciones']['autorizacion']['mensajes']['mensaje'] : null,
+        ) as $bloque) {
+            if (empty($bloque) || !is_array($bloque)) continue;
+            // El SOAP devuelve un mensaje solo, o una lista de mensajes.
+            $lista = isset($bloque['mensaje']) || isset($bloque['identificador']) ? array($bloque) : $bloque;
+            foreach ($lista as $m) {
+                if (!is_array($m)) continue;
+                $txt = trim((isset($m['mensaje']) ? $m['mensaje'] : '') . ' ' . (isset($m['informacionAdicional']) ? $m['informacionAdicional'] : ''));
+                if ($txt !== '') $partes[] = $txt;
+            }
+        }
+        return implode(' | ', array_unique($partes));
+    }
+
+    /** Responde JSON y termina. Mismo formato que el resto del controlador. */
+    private function responder($res)
+    {
+        if (ob_get_level()) { @ob_end_clean(); }
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode($res, JSON_UNESCAPED_UNICODE);
+        die();
+    }
 
     public function reporte($datos)
     {
@@ -955,6 +1110,16 @@ class Ventas extends Controller
         $facturaElectronica = $this->model->getVentaElectronica($idVenta);
         //$claveAcceso= $facturaElectronica['0']['claveacceso'];
 
+        // Una factura sin lineas no se puede enviar: el XML sale con
+        // <detalles></detalles> y el SRI responde error 35 "ARCHIVO NO CUMPLE
+        // ESTRUCTURA XML". Antes se enviaba igual y el rechazo se perdia.
+        if ($this->model->contarDetalle($idVenta) === 0) {
+            $this->responder(array(
+                'msg' => 'ESTA FACTURA NO TIENE PRODUCTOS. No se puede enviar al SRI: hay que anularla y volver a emitirla.',
+                'type' => 'error',
+                'idVenta' => $idVenta,
+            ));
+        }
 
         // SRI try/catch: tolerante a fallos SOAP/SRI
         try {
@@ -971,7 +1136,6 @@ class Ventas extends Controller
         }
         //  print_r($autorizacion['autorizaciones']['autorizacion']['estado']); exit;
         // $data['claveAcceso'] = $claveAcceso;
-        $this->model->actualizarClaveAccesso($claveAcceso, $idVenta);
        // print_r($autorizacion['autorizaciones']); exit;
         $estadoVal  = isset($validacion['estado']) ? $validacion['estado'] : '';
         $numComp    = isset($autorizacion['numeroComprobantes']) ? intval($autorizacion['numeroComprobantes']) : 0;
@@ -979,6 +1143,18 @@ class Ventas extends Controller
                         ? $validacion['comprobantes']['comprobante']['mensajes']['mensaje']['mensaje'] : '';
         $msgUpper = mb_strtoupper((string)$mensajeSri, 'UTF-8');
         $yaRegistrada = (strpos($msgUpper, 'REGISTRADA') !== false || strpos($msgUpper, 'YA EXIST') !== false);
+
+        // Se guarda despues de saber que contesto el SRI, no antes: marcar la
+        // factura como autorizada sin mirar la respuesta es lo que dejaba
+        // facturas devueltas puestas como emitidas y fuera del alcance de los
+        // dos crones de reintento.
+        $resultadoSri = $this->interpretarRespuestaSri($validacion ?? null, $autorizacion);
+        $this->model->actualizarClaveAccesso(
+            $claveAcceso,
+            $idVenta,
+            $resultadoSri['autorizado'],
+            $resultadoSri['mensaje']
+        );
 
         if ($yaRegistrada) {
             // SRI ya tiene este comprobante. Confirmar via autorizacion y reportar OK al cliente.
@@ -1022,6 +1198,19 @@ class Ventas extends Controller
                 'asunto' => 'Adjuntamos Comprobante Electronico'
             );
             $res = array('msg' => 'FACTURA ELECTRONICA GENERADA EXITOSAMENTE REENVIO AL SRI', 'type' => 'success');
+
+            // Si el SRI no la autorizo, no se le manda nada al cliente: una
+            // factura sin autorizacion no sirve y confunde. Queda en
+            // estado_proceso=2 y el cron la reintenta.
+            if (!$resultadoSri['autorizado']) {
+                $this->responder(array(
+                    'msg' => 'EL SRI NO AUTORIZO LA FACTURA' . ($resultadoSri['mensaje'] !== '' ? ': ' . $resultadoSri['mensaje'] : '')
+                             . '. Queda pendiente de reintento.',
+                    'type' => 'error',
+                    'idVenta' => $idVenta,
+                ));
+            }
+
             // Alerta admin: cliente sin correo registrado
             if (empty($dataInfo['email']) || !filter_var($dataInfo['email'], FILTER_VALIDATE_EMAIL)) {
                 try {
